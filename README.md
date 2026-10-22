@@ -37,7 +37,7 @@ say "notify me when done" (Telegram) or "email me the summary" (email).
 
 ## Config
 
-`~/.notifyme/config` (`KEY=value` lines) (or the file in `NOTIFYME_CONFIG`). Any key can be overridden by an
+`~/.notifyme/config`, one `KEY=value` per line (or the file in `NOTIFYME_CONFIG`). Any key can be overridden by an
 env var `NOTIFYME_<KEY>`.
 
 | Key | |
