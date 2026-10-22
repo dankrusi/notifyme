@@ -54,3 +54,7 @@ env var `NOTIFYME_<KEY>`.
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | |
 | `SMTP_FROM`, `SMTP_FROM_NAME` | from defaults to the username |
 | `POPUP_ALWAYS` | `true` to also show a desktop popup for every email/telegram send |
+
+## License
+
+BSD 3-Clause, see [LICENSE](LICENSE).
