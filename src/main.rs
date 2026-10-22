@@ -141,7 +141,7 @@ fn app_dir() -> PathBuf {
 
 impl Config {
     fn load() -> Result<Config> {
-        let path = std::env::var_os("NOTIFYME_CONFIG").map(PathBuf::from).unwrap_or_else(|| app_dir().join(".env"));
+        let path = std::env::var_os("NOTIFYME_CONFIG").map(PathBuf::from).unwrap_or_else(|| app_dir().join("config"));
         let mut values = BTreeMap::new();
         if let Ok(text) = std::fs::read_to_string(&path) {
             for line in text.lines() {
