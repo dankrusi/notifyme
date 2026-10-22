@@ -1,16 +1,20 @@
 # notifyme
 
-Tiny CLI for LLM agents (and humans) to send a notification by Telegram or email.
+Tiny CLI for LLM agents (and humans) to send a notification by Telegram, email or desktop popup.
 
 ```
 notifyme telegram "Build finished"            # to your phone
 notifyme email "Report ready" --subject "CI"  # to your inbox
 notifyme email "Hi" --to someone@example.com  # to others (comma-separate for several)
+notifyme popup "Tests pass"                   # desktop notification on this machine
 echo "long output" | notifyme telegram        # message from stdin
 notifyme install                              # credentials, PATH, agent skills
 ```
 
 Prints `sent` and exits 0 on success; errors go to stderr with exit 1.
+
+`popup` uses the OS notifier: a toast on Windows, Notification Center on macOS
+(`osascript`), `notify-send` on Linux (install `libnotify-bin` if missing).
 
 ## Install
 
@@ -49,3 +53,4 @@ env var `NOTIFYME_<KEY>`.
 | `SMTP_SECURITY` | `tls` (default on 465), `starttls` (default otherwise), `none` |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | |
 | `SMTP_FROM`, `SMTP_FROM_NAME` | from defaults to the username |
+| `POPUP_ALWAYS` | `true` to also show a desktop popup for every email/telegram send |

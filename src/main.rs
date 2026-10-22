@@ -11,10 +11,11 @@ use lettre::{Message, SmtpTransport, Transport};
 use serde_json::{Value, json};
 
 const USAGE: &str = "\
-notifyme - send a notification by email or Telegram
+notifyme - send a notification by email, Telegram or desktop popup
 
   notifyme email \"message\" [--subject S] [--to a@b.com,c@d.com]
   notifyme telegram \"message\" [--to CHAT_ID]
+  notifyme popup \"message\" [--subject TITLE]
   notifyme install    set up credentials, PATH and agent skills
   notifyme config     print the config file path
 
@@ -35,6 +36,7 @@ const KEYS: &[&str] = &[
     "SMTP_FROM_NAME",
     "TELEGRAM_BOT_API_KEY",
     "TELEGRAM_TO",
+    "POPUP_ALWAYS",
 ];
 
 type Result<T> = std::result::Result<T, String>;
@@ -53,13 +55,9 @@ fn run() -> Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
     let mut cfg = Config::load()?;
     match args.cmd.as_str() {
-        "email" | "telegram" => {
+        "email" | "telegram" | "popup" => {
             let msg = args.message()?;
-            if args.cmd == "email" {
-                send_email(&cfg, &msg, &args.to, args.subject.as_deref())?;
-            } else {
-                send_telegram(&cfg, &msg, &args.to)?;
-            }
+            send(&cfg, &args.cmd, &msg, &args.to, args.subject.as_deref())?;
             println!("sent");
             Ok(())
         }
@@ -74,6 +72,21 @@ fn run() -> Result<()> {
         }
         other => Err(format!("unknown command '{other}'\n\n{USAGE}")),
     }
+}
+
+fn send(cfg: &Config, channel: &str, msg: &str, to: &[String], subject: Option<&str>) -> Result<()> {
+    match channel {
+        "email" => send_email(cfg, msg, to, subject)?,
+        "telegram" => send_telegram(cfg, msg, to)?,
+        _ => return send_popup(msg, subject),
+    }
+    // POPUP_ALWAYS also shows every email/telegram notification on this machine (best effort).
+    if cfg.get("POPUP_ALWAYS").is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on")) {
+        if let Err(e) = send_popup(msg, subject) {
+            eprintln!("notifyme: {e}");
+        }
+    }
+    Ok(())
 }
 
 // ---------- args ----------
@@ -276,13 +289,51 @@ fn send_telegram(cfg: &Config, msg: &str, to: &[String]) -> Result<()> {
     Ok(())
 }
 
+// ---------- popup ----------
+
+// Desktop notification via the OS's own notifier; text is passed as env/args, never spliced into scripts.
+fn send_popup(msg: &str, title: Option<&str>) -> Result<()> {
+    let title = title.unwrap_or("notifyme");
+    let mut cmd = if cfg!(windows) {
+        // Windows PowerShell 5.1 (not pwsh) can load the WinRT toast APIs; shows under PowerShell's app id.
+        let script = r"$ErrorActionPreference='Stop'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null
+$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$x=$t.GetElementsByTagName('text')
+$x.Item(0).AppendChild($t.CreateTextNode($env:NM_POPUP_TITLE)) | Out-Null
+$x.Item(1).AppendChild($t.CreateTextNode($env:NM_POPUP_BODY)) | Out-Null
+$n=[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe')
+$n.Show([Windows.UI.Notifications.ToastNotification]::new($t))";
+        let mut c = std::process::Command::new("powershell");
+        c.args(["-NoProfile", "-NonInteractive", "-Command", script]).env("NM_POPUP_TITLE", title).env("NM_POPUP_BODY", msg);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("osascript");
+        c.args(["-e", "on run argv", "-e", "display notification (item 1 of argv) with title (item 2 of argv)", "-e", "end run", msg, title]);
+        c
+    } else {
+        let mut c = std::process::Command::new("notify-send");
+        c.args([title, msg]);
+        c
+    };
+    let out = cmd.output().map_err(|e| format!("popup failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("popup failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(())
+}
+
 // ---------- install ----------
 
 fn ask(prompt: &str) -> String {
     print!("{prompt}");
     io::stdout().flush().ok();
     let mut line = String::new();
-    io::stdin().read_line(&mut line).ok();
+    // Stop on closed input rather than silently accepting every default.
+    if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+        eprintln!("\nnotifyme: input closed, install aborted");
+        std::process::exit(1);
+    }
     line.trim().to_string()
 }
 
@@ -339,10 +390,15 @@ fn install(cfg: &mut Config) -> Result<()> {
         }
     }
 
-    for (cmd, ready) in [("email", email_ready(cfg)), ("telegram", tg_ready(cfg))] {
+    if cfg.get("POPUP_ALWAYS").is_none() {
+        let always = ask_yn("Also show a desktop popup for every email/telegram notification?", false);
+        cfg.set("POPUP_ALWAYS", if always { "true" } else { "false" });
+        cfg.save()?;
+    }
+
+    for (cmd, ready) in [("email", email_ready(cfg)), ("telegram", tg_ready(cfg)), ("popup", true)] {
         if ready && ask_yn(&format!("Send a test {cmd}?"), true) {
-            let msg = "notifyme is set up";
-            let r = if cmd == "email" { send_email(cfg, msg, &[], None) } else { send_telegram(cfg, msg, &[]) };
+            let r = send(cfg, cmd, "notifyme is set up", &[], None);
             println!("  {}", r.map(|_| "sent".to_string()).unwrap_or_else(|e| e));
         }
     }
