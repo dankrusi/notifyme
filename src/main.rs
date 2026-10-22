@@ -132,10 +132,7 @@ struct Config {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn app_dir() -> PathBuf {
@@ -382,8 +379,8 @@ fn detect_chat(token: &str) -> Result<String> {
     }
 }
 
-fn exe_name() -> &'static str {
-    if cfg!(windows) { "notifyme.exe" } else { "notifyme" }
+fn exe_name() -> String {
+    format!("notifyme{}", std::env::consts::EXE_SUFFIX)
 }
 
 fn which() -> Option<PathBuf> {
@@ -397,61 +394,97 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+// Copies via a temp file so an existing (possibly running) target is replaced, not truncated.
+fn copy_exe(from: &Path, to: &Path) -> Result<()> {
+    let tmp = to.with_extension("new");
+    std::fs::copy(from, &tmp).map_err(|e| format!("cannot copy to {}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, to).map_err(|e| format!("cannot replace {}: {e}", to.display()))
+}
+
 fn install_path() -> Result<()> {
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
     let bin = app_dir().join("bin");
     let target = bin.join(exe_name());
-    match which() {
-        Some(found) if !same_file(&found, &target) || same_file(&current, &target) => {
-            println!("Already on PATH: {}", found.display());
-            return Ok(());
-        }
-        Some(_) => {
+    if let Some(found) = which() {
+        if same_file(&found, &target) && !same_file(&current, &target) {
             if ask_yn(&format!("Update {} with this version?", target.display()), true) {
-                std::fs::copy(&current, &target).map_err(|e| e.to_string())?;
+                copy_exe(&current, &target)?;
             }
-            return Ok(());
+        } else {
+            println!("Already on PATH: {}", found.display());
         }
-        None => {}
+        return Ok(());
     }
     if !ask_yn(&format!("Copy notifyme to {} and add it to your PATH?", bin.display()), true) {
         return Ok(());
     }
     std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
     if !same_file(&current, &target) {
-        std::fs::copy(&current, &target).map_err(|e| e.to_string())?;
+        copy_exe(&current, &target)?;
     }
-    if cfg!(windows) {
-        let dir = bin.display().to_string().replace('\'', "''");
-        let script = format!(
-            "$p=[Environment]::GetEnvironmentVariable('Path','User'); if (-not $p) {{ $p='' }}; \
-             if (($p -split ';') -notcontains '{dir}') {{ [Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';') + ';{dir}').TrimStart(';')), 'User') }}"
-        );
-        let ok = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            println!("  Added to user PATH. Open a new terminal to use `notifyme`.");
-        } else {
-            println!("  Could not update PATH; add {} manually.", bin.display());
-        }
-    } else {
-        println!("  Add this to your shell profile: export PATH=\"{}:$PATH\"", bin.display());
+    match add_to_path(&bin) {
+        Ok(done) => println!("  {done}. Open a new terminal to use `notifyme`."),
+        Err(e) => println!("  Could not update PATH ({e}); add {} to it manually.", bin.display()),
     }
     Ok(())
 }
 
-const MARK_START: &str = "<!-- notifyme -->";
-const MARK_END: &str = "<!-- /notifyme -->";
+#[cfg(windows)]
+fn add_to_path(bin: &Path) -> Result<String> {
+    let dir = bin.display().to_string().replace('\'', "''");
+    let script = format!(
+        "$p=[Environment]::GetEnvironmentVariable('Path','User'); if (-not $p) {{ $p='' }}; \
+         if (($p -split ';') -notcontains '{dir}') {{ [Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';') + ';{dir}').TrimStart(';')), 'User') }}"
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("powershell failed".into());
+    }
+    Ok("Added to your user PATH".into())
+}
 
-// Inserts or replaces the notifyme block in an instructions file.
-fn upsert_block(path: &Path) -> Result<()> {
-    let block = format!("{MARK_START}\n{}{MARK_END}\n", AGENTS_MD);
+// Adds an export line to the profiles of the user's shells (fish gets a conf.d file).
+#[cfg(not(windows))]
+fn add_to_path(bin: &Path) -> Result<String> {
+    let h = home();
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    if shell.ends_with("fish") {
+        let file = h.join(".config").join("fish").join("conf.d").join("notifyme.fish");
+        std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::write(&file, format!("fish_add_path -g {:?}\n", bin.display().to_string())).map_err(|e| e.to_string())?;
+        return Ok(format!("Wrote {}", file.display()));
+    }
+    let dir = match bin.strip_prefix(&h) {
+        Ok(rel) => format!("$HOME/{}", rel.display()),
+        Err(_) => bin.display().to_string(),
+    };
+    let line = format!("export PATH=\"{dir}:$PATH\"\n");
+    let mut files: Vec<PathBuf> =
+        [".zshrc", ".bashrc", ".bash_profile", ".profile"].iter().map(|f| h.join(f)).filter(|f| f.is_file()).collect();
+    let own_rc = h.join(if shell.ends_with("zsh") { ".zshrc" } else if shell.ends_with("bash") { ".bashrc" } else { ".profile" });
+    if !files.contains(&own_rc) {
+        files.push(own_rc);
+    }
+    for f in &files {
+        upsert_block(f, "# notifyme", "# /notifyme", &line)?;
+    }
+    Ok(format!("Added to {}", files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ")))
+}
+
+// Inserts or replaces a marked block in a text file, leaving the rest untouched.
+fn upsert_block(path: &Path, start: &str, end: &str, body: &str) -> Result<()> {
+    let block = format!("{start}\n{body}{end}\n");
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    let out = match (text.find(MARK_START), text.find(MARK_END)) {
-        (Some(s), Some(e)) if e > s => format!("{}{block}{}", &text[..s], text[e + MARK_END.len()..].trim_start_matches(['\r', '\n'])),
+    let out = match (text.find(start), text.find(end)) {
+        (Some(s), Some(e)) if e > s => format!("{}{block}{}", &text[..s], text[e + end.len()..].trim_start_matches(['\r', '\n'])),
         _ if text.is_empty() => block,
         _ => format!("{}\n\n{block}", text.trim_end()),
     };
@@ -474,7 +507,7 @@ fn install_skills() -> Result<()> {
             std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
             std::fs::write(&file, SKILL_MD).map_err(|e| e.to_string())?;
         } else {
-            upsert_block(&file)?;
+            upsert_block(&file, "<!-- notifyme -->", "<!-- /notifyme -->", AGENTS_MD)?;
         }
         println!("  wrote {}", file.display());
     }

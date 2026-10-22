@@ -14,14 +14,19 @@ Prints `sent` and exits 0 on success; errors go to stderr with exit 1.
 
 ## Install
 
+Works on Windows, macOS and Linux:
+
 ```
-cargo build --release
-target/release/notifyme.exe install
+cargo run --release -- install
 ```
 
 `install` asks only for missing settings, finds your Telegram chat id automatically
-(just message your bot when prompted), offers to copy itself to `~/.notifyme/bin` and
-add that to PATH, and installs the agent instructions for any detected agents:
+(just message your bot when prompted), and offers to copy itself to `~/.notifyme/bin`
+and put that on your PATH (user PATH on Windows; your shell profile on macOS/Linux:
+`.zshrc`, `.bashrc`, `.bash_profile`, `.profile`, or a fish `conf.d` file). If
+`notifyme` is already on PATH (e.g. via `cargo install --path .`) that step is skipped.
+
+It then installs the agent instructions for any detected agents:
 
 - Claude Code: `~/.claude/skills/notifyme/SKILL.md`
 - Codex: `~/.codex/skills/notifyme/SKILL.md`
